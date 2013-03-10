@@ -52,6 +52,16 @@ except:
     print "also comes with cjdns, check contrib/python/ in the cjdns source"
     sys.exit()
 
+parse_dump = False;
+gen_matrix = False;
+i = 0;
+while i < len(sys.argv):
+    if sys.argv[i] == '--parsedump': parse_dump = True;
+    elif sys.argv[i] == '--matrix': gen_matrix = True;
+    else:
+        i = i + 1;
+        continue;
+    sys.argv.pop(0);
 
 if len(sys.argv) == 5:
     cjdadmin_ip = sys.argv[1]
@@ -67,64 +77,7 @@ elif len(sys.argv) != 1:
     print "Or:"
     print sys.argv[0] + " [<filename>]"
 
-#################################################
-# code from http://effbot.org/zone/bencode.htm
-# Fredrik Lundh 
-#
-# Unless otherwise noted, source code can be be used freely. Examples, 
-# test scripts and other short code fragments can be considered as 
-# being in the public domain. Downloads usually include a README file 
-# that includes the relevant copyright/license information.
 
-def tokenize(text, match=re.compile("([idel])|(\d+):|(-?\d+)").match):
-    i = 0
-    while i < len(text):
-        m = match(text, i)
-        s = m.group(m.lastindex)
-        i = m.end()
-        if m.lastindex == 2:
-            yield "s"
-            yield text[i:i+int(s)]
-            i = i + int(s)
-        else:
-            yield s
-
-def decode_item(next, token):
-    if token == "i":
-        # integer: "i" value "e"
-        data = int(next())
-        if next() != "e":
-            raise ValueError
-    elif token == "s":
-        # string: "s" value (virtual tokens)
-        data = next()
-    elif token == "l" or token == "d":
-        # container: "l" (or "d") values "e"
-        data = []
-        tok = next()
-        while tok != "e":
-            data.append(decode_item(next, tok))
-            tok = next()
-        if token == "d":
-            data = dict(zip(data[0::2], data[1::2]))
-    else:
-        raise ValueError
-    return data
-
-def decode(text):
-    try:
-        src = tokenize(text)
-        data = decode_item(src.next, src.next())
-        for token in src: # look for more tokens
-            raise SyntaxError("trailing junk")
-    except (AttributeError, ValueError, StopIteration):
-        raise SyntaxError("syntax error")
-    return data
-
-# end code from http://effbot.org/zone/bencode.htm
-###################################################
-
-###################################################
 def hsv_to_rgb(h,s,v):
     """ convert hsv to rgb. h is 0-360, s and v are 0-1"""
     r = 0.0
@@ -163,19 +116,28 @@ def hsv_to_color(h,s,v):
     r,g,b = hsv_to_rgb(h,s,v)
     return '#{0:02x}{1:02x}{2:02x}'.format(int(r*255),int(g*255),int(b*255))
 
+
 ###################################################
 
 try:
     cjdns = cjdns_connect(cjdadmin_ip, cjdadmin_port, cjdadmin_pass)
 except:
     cjdns = cjdns_connectWithAdminInfo()
-    
+
+# WARNING: this depends on implementation quirks of the router and will be broken in the future.
+def is_one_hop(parent, child):
+    c = child >> int(math.log(parent,2));
+    if c & 1: return int(math.log(c,2)) == 4;
+    if c & 3: return int(math.log(c,2)) == 7;
+    return math.log(c,2) == 10;
+
 class route:
     def __init__(self, ip, name, path, link):
         self.ip = ip
         self.name = name
         route = path
         route = route.replace('.','')
+        self.broute = int('0x' + route, 16);
         route = route.replace('0','x')
         route = route.replace('1','y')
         route = route.replace('f','1111')
@@ -194,15 +156,17 @@ class route:
         route = route.replace('2','0010')
         route = route.replace('y','0001')
         route = route.replace('x','0000')
+        # reverse the string, strip trailing zeros, then strip the trailing 1
         self.route = route[::-1].rstrip('0')[:-1]
         self.quality = link / 5366870.0 # LINK_STATE_MULTIPLIER
         
     def find_parent(self, routes):
-        parents = [(len(other.route),other) for other in routes if self.route.startswith(other.route) and self != other]
+        parents = [(len(other.route),other) for other in routes if self.route.startswith(other.route) and self.broute != other.broute]
 
         parents.sort(reverse=True)
         if parents:
             parent = parents[0][1]
+            if not is_one_hop(parent.broute, self.broute): return None;
             return parent
         return None
         
@@ -230,49 +194,30 @@ for node in nameip:
     else:
         names[node['ip']]=node['name'] + ' ' + ip.split(':')[-1]
 
-"""
-page = 'http://ircerr.bt-chat.com/cjdns/ipv6-cjdnet.data.txt'
-print('Downloading the list of node names from {0} ...'.format(page))
-names = {}
-h = httplib2.Http(".cache")
-r, content = h.request(page, "GET")
-
-existing_names = set()
-doubles = set()
-nameip = []
-for l in content.split('\n'):
-    l = l.strip()
-    if not l or l.startswith('#'):
-        continue
-    d = l.split(' ')
-    if len(d) < 2:
-        continue # use the standard last two bytes
-    ip   = d[0]
-    name = d[1]
-    nameip.append((name,ip))
-    if name in existing_names:
-        doubles.add(name)
-    existing_names.add(name)
-    
-for name,ip in nameip:
-    if not name in doubles:
-        names[ip]=name
-    else:
-        names[ip]=name + ' ' + ip.split(':')[-1]
-"""
-
 routes = [];
-i = 0;
-while True:
-    table = cjdns.NodeStore_dumpTable(i)
-    for r in table['routingTable']:
-        name = r['ip'].split(':')[-1]
-        if r['ip'] in names:
-            name = names[r['ip']]
-        routes.append(route(r['ip'],name,r['path'],r['link']))
-    if not 'more' in table:
-        break
-    i += 1
+if parse_dump:
+    i = 0;
+    for line in sys.stdin:
+        components = line.split(' ');
+        ip = components[0];
+        path = components[1];
+        link = int(components[2]);
+        name = ip.split(':')[-1];
+        if ip in names: name = names[ip];
+        routes.append(route(ip, name, path, link));
+
+else:
+    i = 0;
+    while True:
+        table = cjdns.NodeStore_dumpTable(i)
+        for r in table['routingTable']:
+            name = r['ip'].split(':')[-1]
+            if r['ip'] in names:
+                name = names[r['ip']]
+            routes.append(route(r['ip'],name,r['path'],r['link']))
+        if not 'more' in table:
+            break
+        i += 1
 
         
 # sort the routes on quality
@@ -375,6 +320,27 @@ def add_edges(active,color):
                     weight = '0.01'
                 edges.append((pn,rn,weight,color,r.quality))
             set_link_strength(pn,rn,r.quality)
+
+if gen_matrix:
+    print "generating matrix";
+    node_links = {};
+    nodes = [];
+    for r in routes:
+        parent = r.find_parent(routes);
+        if parent:
+            ipA,ipB = sorted([r.ip, parent.ip]);
+            if ipA not in node_links: node_links[ipA] = [];
+            nA = node_links[ipA];
+            if ipB not in nA: nA.append(ipB);
+            if ipA not in nodes: nodes.append(ipA);
+
+    nodes = sorted(nodes);
+    for n in nodes:
+        for nl in node_links[n]:
+            print n + " -> " + nl;
+    sys.exit(0);
+    
+
 add_edges(True,'black')
 add_edges(False,'grey')
 
