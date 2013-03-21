@@ -322,7 +322,7 @@ def add_edges(active,color):
             set_link_strength(pn,rn,r.quality)
 
 if gen_matrix:
-    print "generating matrix";
+    print "[";
     node_links = {};
     nodes = [];
     for r in routes:
@@ -337,7 +337,8 @@ if gen_matrix:
     nodes = sorted(nodes);
     for n in nodes:
         for nl in node_links[n]:
-            print n + " -> " + nl;
+            print "[\"" + n + "\", \"" + nl + "\"],";
+    print "]";
     sys.exit(0);
     
 
